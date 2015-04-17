@@ -1,4 +1,6 @@
-from pyspark import SparkContext 
+#lipingxiong
+
+from pyspark import SparkContext
 import logging
 import numpy as np
 #from pyspark import *
@@ -15,7 +17,7 @@ spark-submit dsgd_mf.py 100 10 50 0.8 1.0 test.csv w.csv h.csv
 """
 
 #The typical solution would be mapPartitions so for each worker the function you give mapPartitions is executed in parallel but inside each worker you define a method that sequentially performs the sgd updates within an active block
-sc = SparkContext(appName="PythonPi")
+sc = SparkContext(appName="dsgd_mf")
 num_factors=int(sys.argv[1])
 num_workers=int(sys.argv[2])
 num_iterations=int(sys.argv[3])
@@ -25,24 +27,29 @@ in_Vfile=sys.argv[6]
 out_Wfile=sys.argv[7]
 out_Hfile=sys.argv[8]
 tempdir="./"
-#file=sys.argv[8]
 
+#load the text file
 path = os.path.join(tempdir, in_Vfile)
 V = sc.textFile(path)
 #logging.debug( "count=%d"% V.count())
 
 #tmpRdd=V.map(lambda line : (line.split(",")[0],line.split(",")[1], line.split(",")[2]) ).cache()
 arrRdd=V.map(lambda line : map(int,line.split(','))).cache()
+#get the Ni and Nj
 Ni_li=arrRdd.map(lambda x : (x[0],1)).reduceByKey(lambda x,y:x+y).collect()
 Nj_li=arrRdd.map(lambda x : (x[1],1)).reduceByKey(lambda x,y:x+y).collect()
+#get the maxRow and maxCol
 maxRow=arrRdd.map(lambda x : x[0]).reduce(lambda x,y:max(x,y))
 maxCol=arrRdd.map(lambda x : x[1]).reduce(lambda x,y:max(x,y))
 
+#calculate the rowsize and colsize of the block
 block_rowsize=maxRow/num_workers
 block_colsize=maxCol/num_workers
-#W: M*F, H: F*N
+
+# Intitilize W and H, W: M*F, H: F*N
 matrixW= np.random.random((maxRow,num_factors)) 
-matrixH= np.random.random((num_factors,maxCol)) 
+matrixH= np.random.random((num_factors,maxCol))
+#transform to dict for using later
 W_dict={}
 H_dict={}
 for i in range(maxRow):
@@ -58,25 +65,31 @@ for e in Ni_li:
 for e in Nj_li:
 	Nj_dict[e[0]]=e[1]
 
+# broadcast Ni and Nj
 Nibd=sc.broadcast(Ni_dict)
 Njbd=sc.broadcast(Nj_dict)
 mPerStrata=0
 #for e in Ni_li:
 #	mPerStrata+=Ni_li[]
 
+# the sgd function for each worker
 def sgd(idx,D):
 	key=idx
 	#logging.debug( "key=%s"%key)
+    # get W,H,Ni,Nj from broadcast
 	W=Wbd.value
 	H=Wbd.value
 	Ni=Nibd.value
 	Nj=Njbd.value
 	mCnt=mCntbd.value
+    #get permutation sequence from the broadcast
 	permArr=permbd.value
 	perm=permArr[key]
 	J=[]
+    # get the block rows and cols this worker should work on
 	for j in range(block_colsize):
 		J.append(block_colsize*perm+j+1)
+    # this two dicts are the W_I and H_J that will be updated
 	WI_new={}
 	HJ_new={}
 	T0=100
@@ -96,23 +109,28 @@ def sgd(idx,D):
 			WI_new[i]=W[i] - epsilon*logW
 			HJ_new[j]=H[j] - epsilon*logH
 			loss+=eij
+    #return the updated W_I and H_J and the loss
 	return [('w',WI_new),('h',HJ_new),('l',loss)]
 
+# do the partition
 def partFunc(key):
 	return key/block_rowsize
 partRdd=arrRdd.map(lambda x:(x[0],x)).partitionBy(num_workers,partFunc).cache()
+
 #begin iteration
 mBef=0
 for t in range(num_iterations):
 	Wbd=sc.broadcast(W_dict)
 	Hbd=sc.broadcast(H_dict)
 	#permutation
+    permbd=sc.broadcast(permArr)
+    #broadcase W,H,permutation
+    newWH=partRdd.mapPartitionsWithIndex(sgd,True).collect()
+        
 	permArr=np.random.permutation(num_workers)
 	mCntbd=sc.broadcast( (mTot/num_workers) * (t+1) )
 	Tbd=sc.broadcast(mTot/(num_workers*num_workers)  )
-	permbd=sc.broadcast(permArr)
-	#broadcase W,H,permutation
-	newWH=partRdd.mapPartitionsWithIndex(sgd,True).collect()
+
 	for e in newWH:
 		#logging.debug("e[0=]%s"%e.type)
 		if(e[0]=='w'):
@@ -123,6 +141,7 @@ for t in range(num_iterations):
 #output
 outw = open(out_Wfile, 'w+')
 outh = open(out_Hfile, 'w+')
+# write W to w.csv
 for i in range(maxRow):
 	i=i+1
 	if(W_dict.has_key(i)):
@@ -132,7 +151,8 @@ for i in range(maxRow):
 	else:
 		newList=['0']*num_factors
 		outw.write(','.join(newList)+'\n')
-	
+
+# write H to h.csv
 tmp=matrixH.T
 for j in range(maxCol):
 	if(H_dict.has_key(j+1)):
@@ -146,13 +166,3 @@ for j in range(num_factors):
 	s=','.join(newList)
 	print s
 	outh.write(s+'\n')
-
-
-	
-
-
-
-
-
-
-
